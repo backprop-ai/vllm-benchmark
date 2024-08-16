@@ -71,6 +71,10 @@ The benchmark results are saved in JSON format, containing detailed metrics for 
 - Tokens per second (average, p50, p95, p99)
 - Time to first token (average, p50, p95, p99)
 
+## Results
+
+Please see the results directory for benchmarks on [Backprop](https://backprop.co) instances.
+
 ## Contributing
 
 Contributions to improve the benchmarking scripts or add new features are welcome! Please feel free to submit pull requests or open issues for any bugs or feature requests.
