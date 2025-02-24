@@ -5,6 +5,7 @@ This repository contains scripts for benchmarking the performance of large langu
 ## Features
 
 - Benchmark LLMs with different concurrency levels
+- Support for any model available in your vLLM server
 - Measure key performance metrics:
   - Requests per second
   - Latency
@@ -49,6 +50,20 @@ Parameters:
 - `vllm_url`: URL of the vLLM server
 - `api_key`: API key for the vLLM server
 - `request_timeout`: (Optional) Timeout for each request in seconds (default: 30)
+- `model`: (Optional) Model to benchmark (default: "NousResearch/Meta-Llama-3.1-8B-Instruct")
+- `use_long_context`: (Optional) Use long context prompt pairs instead of short prompts
+
+### Examples
+
+Basic benchmark with default model:
+```bash
+python vllm_benchmark.py --num_requests 100 --concurrency 10 --vllm_url "http://localhost:8000/v1" --api_key "your-api-key"
+```
+
+Benchmark a specific model:
+```bash
+python vllm_benchmark.py --num_requests 100 --concurrency 10 --vllm_url "http://localhost:8000/v1" --api_key "your-api-key" --model "meta-llama/Llama-2-7b-chat-hf"
+```
 
 ### Multiple Benchmark Runs
 
