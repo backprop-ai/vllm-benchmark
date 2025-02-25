@@ -118,7 +118,7 @@ async def process_stream(stream):
             break
     return first_token_time, total_tokens
 
-async def make_request(client, output_tokens, request_timeout, use_long_context):
+async def make_request(client, output_tokens, request_timeout, use_long_context, model):
     start_time = time.time()
     if use_long_context:
         prompt_pair = random.choice(LONG_PROMPT_PAIRS)
@@ -128,7 +128,7 @@ async def make_request(client, output_tokens, request_timeout, use_long_context)
 
     try:
         stream = await client.chat.completions.create(
-            model="NousResearch/Meta-Llama-3.1-8B-Instruct",
+            model=model,
             messages=[
                 {"role": "user", "content": content}
             ],
@@ -150,7 +150,7 @@ async def make_request(client, output_tokens, request_timeout, use_long_context)
         logging.error(f"Error during request: {str(e)}")
         return None
 
-async def worker(client, semaphore, queue, results, output_tokens, request_timeout, use_long_context):
+async def worker(client, semaphore, queue, results, output_tokens, request_timeout, use_long_context, model):
     while True:
         async with semaphore:
             task_id = await queue.get()
@@ -158,7 +158,7 @@ async def worker(client, semaphore, queue, results, output_tokens, request_timeo
                 queue.task_done()
                 break
             logging.info(f"Starting request {task_id}")
-            result = await make_request(client, output_tokens, request_timeout, use_long_context)
+            result = await make_request(client, output_tokens, request_timeout, use_long_context, model)
             if result:
                 results.append(result)
             else:
@@ -173,13 +173,13 @@ def calculate_percentile(values, percentile, reverse=False):
         return np.percentile(values, 100 - percentile)
     return np.percentile(values, percentile)
 
-async def run_benchmark(num_requests, concurrency, request_timeout, output_tokens, vllm_url, api_key, use_long_context):
-    client = AsyncOpenAI(base_url=vllm_url, api_key=api_key)
-    semaphore = asyncio.Semaphore(concurrency)
-    queue = asyncio.Queue()
-    results = []
+async def run_benchmark(num_requests, concurrency, request_timeout, output_tokens, vllm_url, api_key, use_long_context, model):
+    client = AsyncOpenAI(
+        base_url=vllm_url,
+        api_key=api_key
+    )
 
-    # Add tasks to the queue
+    queue = asyncio.Queue()
     for i in range(num_requests):
         await queue.put(i)
     
@@ -187,51 +187,46 @@ async def run_benchmark(num_requests, concurrency, request_timeout, output_token
     for _ in range(concurrency):
         await queue.put(None)
 
-    # Create worker tasks
-    workers = [asyncio.create_task(worker(client, semaphore, queue, results, output_tokens, request_timeout, use_long_context)) for _ in range(concurrency)]
+    results = []
+    semaphore = asyncio.Semaphore(concurrency)
+    tasks = []
+    for _ in range(concurrency):
+        task = asyncio.create_task(worker(client, semaphore, queue, results, output_tokens, request_timeout, use_long_context, model))
+        tasks.append(task)
 
-    start_time = time.time()
-    
-    # Wait for all tasks to complete
+    await asyncio.gather(*tasks)
     await queue.join()
-    await asyncio.gather(*workers)
 
-    end_time = time.time()
+    # Calculate statistics
+    if not results:
+        return {
+            "error": "No successful requests"
+        }
 
-    # Calculate metrics
-    total_elapsed_time = end_time - start_time
-    total_tokens = sum(tokens for tokens, _, _, _ in results if tokens is not None)
-    latencies = [elapsed_time for _, elapsed_time, _, _ in results if elapsed_time is not None]
-    tokens_per_second_list = [tps for _, _, tps, _ in results if tps is not None]
-    ttft_list = [ttft for _, _, _, ttft in results if ttft is not None]
+    total_tokens = [r[0] for r in results]
+    elapsed_times = [r[1] for r in results]
+    tokens_per_second = [r[2] for r in results]
+    ttfts = [r[3] for r in results if r[3] is not None]
 
-    successful_requests = len(results)
-    requests_per_second = successful_requests / total_elapsed_time if total_elapsed_time > 0 else 0
-    avg_latency = sum(latencies) / len(latencies) if latencies else 0
-    avg_tokens_per_second = sum(tokens_per_second_list) / len(tokens_per_second_list) if tokens_per_second_list else 0
-    avg_ttft = sum(ttft_list) / len(ttft_list) if ttft_list else 0
-    
-    # Calculate percentiles
-    percentiles = [50, 95, 99]
-    latency_percentiles = [calculate_percentile(latencies, p) for p in percentiles]
-    tps_percentiles = [calculate_percentile(tokens_per_second_list, p, reverse=True) for p in percentiles]
-    ttft_percentiles = [calculate_percentile(ttft_list, p) for p in percentiles]
-    
+    avg_total_tokens = sum(total_tokens) / len(total_tokens)
+    avg_elapsed_time = sum(elapsed_times) / len(elapsed_times)
+    avg_tokens_per_second = sum(tokens_per_second) / len(tokens_per_second)
+    avg_ttft = sum(ttfts) / len(ttfts) if ttfts else None
+
+    elapsed_percentiles = [calculate_percentile(elapsed_times, p) for p in [50, 95, 99]]
+    tps_percentiles = [calculate_percentile(tokens_per_second, p, reverse=True) for p in [50, 95, 99]]
+    ttft_percentiles = [calculate_percentile(ttfts, p) for p in [50, 95, 99]] if ttfts else [None, None, None]
+
     return {
-        "total_requests": num_requests,
-        "successful_requests": successful_requests,
-        "concurrency": concurrency,
-        "request_timeout": request_timeout,
-        "max_output_tokens": output_tokens,
-        "use_long_context": use_long_context,
-        "total_time": total_elapsed_time,
-        "requests_per_second": requests_per_second,
-        "total_output_tokens": total_tokens,
-        "latency": {
-            "average": avg_latency,
-            "p50": latency_percentiles[0],
-            "p95": latency_percentiles[1],
-            "p99": latency_percentiles[2]
+        "model": model,
+        "num_requests": num_requests,
+        "successful_requests": len(results),
+        "average_tokens": avg_total_tokens,
+        "elapsed_time": {
+            "average": avg_elapsed_time,
+            "p50": elapsed_percentiles[0],
+            "p95": elapsed_percentiles[1],
+            "p99": elapsed_percentiles[2]
         },
         "tokens_per_second": {
             "average": avg_tokens_per_second,
@@ -259,9 +254,10 @@ if __name__ == "__main__":
     parser.add_argument("--vllm_url", type=str, required=True, help="URL of the vLLM server")
     parser.add_argument("--api_key", type=str, required=True, help="API key for vLLM server")
     parser.add_argument("--use_long_context", action="store_true", help="Use long context prompt pairs instead of short prompts")
+    parser.add_argument("--model", type=str, default="NousResearch/Meta-Llama-3.1-8B-Instruct", help="Model to benchmark (default: NousResearch/Meta-Llama-3.1-8B-Instruct)")
     args = parser.parse_args()
 
-    results = asyncio.run(run_benchmark(args.num_requests, args.concurrency, args.request_timeout, args.output_tokens, args.vllm_url, args.api_key, args.use_long_context))
+    results = asyncio.run(run_benchmark(args.num_requests, args.concurrency, args.request_timeout, args.output_tokens, args.vllm_url, args.api_key, args.use_long_context, args.model))
     print_results(results)
 else:
     # When imported as a module, provide the run_benchmark function
